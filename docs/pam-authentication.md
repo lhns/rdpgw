@@ -217,8 +217,8 @@ Since `mstsc` doesn't support basic authentication, use these alternatives:
 - Secure the Unix socket with appropriate permissions
 - Use strong PAM configurations (account lockout, password complexity)
 - Enable logging for authentication events
-- Consider rate limiting for brute force protection
-- Use encrypted connections (TLS) for the gateway
+- Failed logins are throttled per client IP and username (see `Lockout` in [LDAP Authentication](ldap-authentication.md#lockout))
+- Use encrypted connections (TLS) for the gateway; behind a TLS-terminating proxy set `TlsTerminatedByProxy` (see [LDAP Authentication](ldap-authentication.md#behind-a-tls-terminating-proxy))
 
 ## Troubleshooting
 

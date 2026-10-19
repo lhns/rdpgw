@@ -67,6 +67,7 @@ const (
 	AuthenticationBasic    = "local"
 	AuthenticationKerberos = "kerberos"
 	AuthenticationHeader   = "header"
+	AuthenticationLdap     = "ldap"
 )
 
 type Configuration struct {
@@ -74,6 +75,8 @@ type Configuration struct {
 	OpenId   OpenIDConfig   `koanf:"openid"`
 	Kerberos KerberosConfig `koanf:"kerberos"`
 	Header   HeaderConfig   `koanf:"header"`
+	Ldap     LdapConfig     `koanf:"ldap"`
+	Lockout  LockoutConfig  `koanf:"lockout"`
 	Caps     RDGCapsConfig  `koanf:"caps"`
 	Security SecurityConfig `koanf:"security"`
 	Client   ClientConfig   `koanf:"client"`
@@ -108,8 +111,13 @@ type ServerConfig struct {
 	// TrustedProxies is the CIDR allow-list of upstream proxies whose
 	// X-Forwarded-For header is honored when deriving the client IP.
 	// Empty (the default) makes the gateway ignore X-Forwarded-For
-	// entirely and use r.RemoteAddr.
+	// entirely and use r.RemoteAddr. The client is the rightmost
+	// X-Forwarded-For address not in this list, so list every proxy hop.
 	TrustedProxies []string `koanf:"trustedproxies"`
+	// TlsTerminatedByProxy allows basic authentication with tls=disable.
+	// Credentials are then accepted only from a TrustedProxies peer that
+	// reports X-Forwarded-Proto: https.
+	TlsTerminatedByProxy bool `koanf:"tlsterminatedbyproxy"`
 }
 
 type KerberosConfig struct {
@@ -131,6 +139,35 @@ type HeaderConfig struct {
 	// TrustedProxies is the CIDR allow-list of upstream proxies allowed to
 	// stamp UserHeader (and friends). Empty disables header auth at runtime.
 	TrustedProxies  []string `koanf:"trustedproxies"`
+}
+
+// LdapConfig configures `authentication: ldap`: HTTP Basic credentials
+// verified by binding to an LDAP server as the user.
+type LdapConfig struct {
+	// Url is ldap://host:port or ldaps://host:port.
+	Url string `koanf:"url"`
+	// StartTls upgrades an ldap:// connection before binding.
+	StartTls bool `koanf:"starttls"`
+	// CaFile is a PEM bundle that replaces the system roots for the LDAP
+	// server certificate.
+	CaFile string `koanf:"cafile"`
+	// UserDnTemplate is the bind DN, with {username} replaced by the
+	// escaped username, e.g. uid={username},ou=people,dc=example,dc=com.
+	UserDnTemplate string `koanf:"userdntemplate"`
+	// RequiredGroups lists group DNs; the user's memberOf must contain one.
+	// Empty admits every user that can bind.
+	RequiredGroups []string `koanf:"requiredgroups"`
+}
+
+// LockoutConfig throttles basic authentication (local, ldap). Attempts
+// beyond MaxFailures within Window lock the client IP or the username out
+// for the given duration. Durations are in seconds; a zero max disables.
+type LockoutConfig struct {
+	IpMaxFailures   int `koanf:"ipmaxfailures"`
+	IpDuration      int `koanf:"ipduration"`
+	UserMaxFailures int `koanf:"usermaxfailures"`
+	UserDuration    int `koanf:"userduration"`
+	Window          int `koanf:"window"`
 }
 
 type RDGCapsConfig struct {
@@ -222,6 +259,11 @@ func Load(configFile string) Configuration {
 		"Server.Authentication":      "openid",
 		"Server.AuthSocket":          "/tmp/rdpgw-auth.sock",
 		"Server.BasicAuthTimeout":    5,
+		"Lockout.IpMaxFailures":      10,
+		"Lockout.IpDuration":         3600,
+		"Lockout.UserMaxFailures":    5,
+		"Lockout.UserDuration":       300,
+		"Lockout.Window":             900,
 		"Client.NetworkAutoDetect":   1,
 		"Client.BandwidthAutoDetect": 1,
 		"Security.VerifyClientIp":    true,
@@ -260,6 +302,8 @@ func Load(configFile string) Configuration {
 	k.UnmarshalWithConf("Security", &Conf.Security, koanfTag)
 	k.UnmarshalWithConf("Client", &Conf.Client, koanfTag)
 	k.UnmarshalWithConf("Kerberos", &Conf.Kerberos, koanfTag)
+	k.UnmarshalWithConf("Ldap", &Conf.Ldap, koanfTag)
+	k.UnmarshalWithConf("Lockout", &Conf.Lockout, koanfTag)
 
 	if err := checkDefaultSecrets(&Conf); err != nil {
 		log.Fatalf("refusing to start: %s", err)
@@ -296,8 +340,20 @@ func Load(configFile string) Configuration {
 		log.Fatalf("host selection is set to `signed` but `querytokensigningkey` is not set")
 	}
 
-	if Conf.Server.BasicAuthEnabled() && Conf.Server.Tls == "disable" {
-		log.Fatalf("basicauth=local and tls=disable are mutually exclusive")
+	if err := checkBasicAuthTransport(&Conf.Server); err != nil {
+		log.Fatalf("refusing to start: %s", err)
+	}
+
+	if err := checkLdap(&Conf); err != nil {
+		log.Fatalf("refusing to start: %s", err)
+	}
+
+	if err := checkLockout(&Conf.Lockout); err != nil {
+		log.Fatalf("refusing to start: %s", err)
+	}
+
+	if Conf.Server.LdapEnabled() && (Conf.Server.matchAuth("local") || Conf.Server.matchAuth("basic")) {
+		log.Fatalf("local and ldap authentication both use basic auth and are not stackable")
 	}
 
 	if Conf.Server.NtlmEnabled() && Conf.Server.KerberosEnabled() {
@@ -324,6 +380,42 @@ func Load(configFile string) Configuration {
 	return Conf
 }
 
+// checkBasicAuthTransport keeps basic auth credentials off plain HTTP unless
+// the operator vouches for a TLS-terminating proxy in front of rdpgw.
+func checkBasicAuthTransport(s *ServerConfig) error {
+	if s.TlsTerminatedByProxy && len(s.TrustedProxies) == 0 {
+		return fmt.Errorf("server.tlsterminatedbyproxy needs server.trustedproxies to name the terminating proxy")
+	}
+	if s.BasicAuthEnabled() && s.Tls == TlsDisable && !s.TlsTerminatedByProxy {
+		return fmt.Errorf("basic authentication (local, ldap) with tls=disable needs server.tlsterminatedbyproxy: true behind a TLS-terminating proxy")
+	}
+	return nil
+}
+
+// checkLdap rejects combinations in which no ldap client could connect.
+func checkLdap(c *Configuration) error {
+	if !c.Server.LdapEnabled() {
+		return nil
+	}
+	if c.Caps.TokenAuth {
+		return fmt.Errorf("ldap authentication needs caps.tokenauth: false; basic auth clients carry no PAA token")
+	}
+	if c.Server.HostSelection == HostSelectionSigned {
+		return fmt.Errorf("ldap authentication cannot use hostselection: signed, which needs a PAA token")
+	}
+	return nil
+}
+
+func checkLockout(l *LockoutConfig) error {
+	if l.IpMaxFailures > 0 && (l.IpDuration <= 0 || l.Window <= 0) {
+		return fmt.Errorf("lockout.ipduration and lockout.window must be positive when lockout.ipmaxfailures is set")
+	}
+	if l.UserMaxFailures > 0 && (l.UserDuration <= 0 || l.Window <= 0) {
+		return fmt.Errorf("lockout.userduration and lockout.window must be positive when lockout.usermaxfailures is set")
+	}
+	return nil
+}
+
 func (s *ServerConfig) OpenIDEnabled() bool {
 	return s.matchAuth("openid")
 }
@@ -332,8 +424,14 @@ func (s *ServerConfig) KerberosEnabled() bool {
 	return s.matchAuth("kerberos")
 }
 
+// BasicAuthEnabled reports whether HTTP Basic is accepted on the gateway
+// endpoint, whichever backend verifies it.
 func (s *ServerConfig) BasicAuthEnabled() bool {
-	return s.matchAuth("local") || s.matchAuth("basic")
+	return s.matchAuth("local") || s.matchAuth("basic") || s.LdapEnabled()
+}
+
+func (s *ServerConfig) LdapEnabled() bool {
+	return s.matchAuth(AuthenticationLdap)
 }
 
 func (s *ServerConfig) NtlmEnabled() bool {

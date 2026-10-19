@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -162,6 +163,141 @@ func TestHeaderConfigValidation(t *testing.T) {
 			}
 			if tc.headerConf.UserHeader != "" && tc.shouldError {
 				t.Error("expected configuration to be invalid")
+			}
+		})
+	}
+}
+func TestBasicAuthBackends(t *testing.T) {
+	cases := []struct {
+		authentication []string
+		basic, ldap    bool
+	}{
+		{[]string{"local"}, true, false},
+		{[]string{"basic"}, true, false},
+		{[]string{"ldap"}, true, true},
+		{[]string{"openid", "ntlm"}, false, false},
+	}
+	for _, tc := range cases {
+		s := &ServerConfig{Authentication: tc.authentication}
+		if got := s.BasicAuthEnabled(); got != tc.basic {
+			t.Errorf("%v: BasicAuthEnabled() = %t, want %t", tc.authentication, got, tc.basic)
+		}
+		if got := s.LdapEnabled(); got != tc.ldap {
+			t.Errorf("%v: LdapEnabled() = %t, want %t", tc.authentication, got, tc.ldap)
+		}
+	}
+}
+
+func TestLoadLdapFromEnv(t *testing.T) {
+	cases := []struct {
+		name   string
+		groups string
+		want   []string
+	}{
+		{"one group", "cn=rdp,ou=groups,dc=example,dc=com", []string{"cn=rdp,ou=groups,dc=example,dc=com"}},
+		{"space separated groups", "cn=rdp,ou=groups,dc=example,dc=com cn=admin,ou=groups,dc=example,dc=com",
+			[]string{"cn=rdp,ou=groups,dc=example,dc=com", "cn=admin,ou=groups,dc=example,dc=com"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RDPGW_SERVER__AUTHENTICATION", "ldap")
+			t.Setenv("RDPGW_CAPS__TOKEN_AUTH", "false")
+			t.Setenv("RDPGW_LDAP__URL", "ldap://lldap.example.svc:3890")
+			t.Setenv("RDPGW_LDAP__START_TLS", "true")
+			t.Setenv("RDPGW_LDAP__USER_DN_TEMPLATE", "uid={username},ou=people,dc=example,dc=com")
+			t.Setenv("RDPGW_LDAP__REQUIRED_GROUPS", tc.groups)
+			Conf = Configuration{}
+
+			c := Load("does-not-exist.yaml")
+			if !c.Server.LdapEnabled() {
+				t.Fatalf("ldap not enabled, authentication = %v", c.Server.Authentication)
+			}
+			if c.Ldap.Url != "ldap://lldap.example.svc:3890" || !c.Ldap.StartTls ||
+				c.Ldap.UserDnTemplate != "uid={username},ou=people,dc=example,dc=com" {
+				t.Errorf("unexpected ldap config %+v", c.Ldap)
+			}
+			if !reflect.DeepEqual(c.Ldap.RequiredGroups, tc.want) {
+				t.Errorf("RequiredGroups = %q, want %q", c.Ldap.RequiredGroups, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckBasicAuthTransport(t *testing.T) {
+	proxies := []string{"10.0.0.0/8"}
+	cases := []struct {
+		name    string
+		s       ServerConfig
+		wantErr bool
+	}{
+		{"basic over tls", ServerConfig{Authentication: []string{"ldap"}, Tls: TlsAuto}, false},
+		{"basic on plain http", ServerConfig{Authentication: []string{"ldap"}, Tls: TlsDisable}, true},
+		{"local on plain http", ServerConfig{Authentication: []string{"local"}, Tls: TlsDisable}, true},
+		{"basic behind a terminating proxy", ServerConfig{Authentication: []string{"ldap"}, Tls: TlsDisable, TlsTerminatedByProxy: true, TrustedProxies: proxies}, false},
+		{"opt-in without trusted proxies", ServerConfig{Authentication: []string{"ldap"}, Tls: TlsDisable, TlsTerminatedByProxy: true}, true},
+		{"openid on plain http", ServerConfig{Authentication: []string{"openid"}, Tls: TlsDisable}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkBasicAuthTransport(&tc.s); (err != nil) != tc.wantErr {
+				t.Errorf("checkBasicAuthTransport() = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadLockoutDefaultsAndEnv(t *testing.T) {
+	t.Setenv("RDPGW_SERVER__AUTHENTICATION", "ldap")
+	t.Setenv("RDPGW_CAPS__TOKEN_AUTH", "false")
+	t.Setenv("RDPGW_LOCKOUT__USER_MAX_FAILURES", "3")
+	Conf = Configuration{}
+
+	c := Load("does-not-exist.yaml")
+	want := LockoutConfig{IpMaxFailures: 10, IpDuration: 3600, UserMaxFailures: 3, UserDuration: 300, Window: 900}
+	if c.Lockout != want {
+		t.Errorf("Lockout = %+v, want %+v", c.Lockout, want)
+	}
+}
+
+func TestCheckLdap(t *testing.T) {
+	cases := []struct {
+		name    string
+		c       Configuration
+		wantErr bool
+	}{
+		{"unsigned without token auth", Configuration{Server: ServerConfig{Authentication: []string{"ldap"}, HostSelection: "unsigned"}}, false},
+		{"token auth on", Configuration{Server: ServerConfig{Authentication: []string{"ldap"}}, Caps: RDGCapsConfig{TokenAuth: true}}, true},
+		{"signed hosts", Configuration{Server: ServerConfig{Authentication: []string{"ldap"}, HostSelection: HostSelectionSigned}}, true},
+		{"other modes untouched", Configuration{Server: ServerConfig{Authentication: []string{"openid"}}, Caps: RDGCapsConfig{TokenAuth: true}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkLdap(&tc.c); (err != nil) != tc.wantErr {
+				t.Errorf("checkLdap() = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCheckLockout(t *testing.T) {
+	valid := LockoutConfig{IpMaxFailures: 10, IpDuration: 3600, UserMaxFailures: 5, UserDuration: 300, Window: 900}
+	cases := []struct {
+		name    string
+		modify  func(*LockoutConfig)
+		wantErr bool
+	}{
+		{"defaults", func(*LockoutConfig) {}, false},
+		{"zero window", func(l *LockoutConfig) { l.Window = 0 }, true},
+		{"zero ip duration", func(l *LockoutConfig) { l.IpDuration = 0 }, true},
+		{"negative user duration", func(l *LockoutConfig) { l.UserDuration = -1 }, true},
+		{"disabled limiters need no durations", func(l *LockoutConfig) { *l = LockoutConfig{} }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := valid
+			tc.modify(&l)
+			if err := checkLockout(&l); (err != nil) != tc.wantErr {
+				t.Errorf("checkLockout(%+v) = %v, wantErr %t", l, err, tc.wantErr)
 			}
 		})
 	}

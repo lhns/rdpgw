@@ -62,7 +62,7 @@ settings.
 ## Authentication
 
 RDPGW wants to be secure when you set it up from the start. It supports several authentication
-mechanisms such as OpenID Connect, Kerberos, PAM, NTLM, and header-based authentication for proxy integration.
+mechanisms such as OpenID Connect, Kerberos, PAM, LDAP, NTLM, and header-based authentication for proxy integration.
 
 Technically, cookies are encrypted and signed on the client side relying
 on [Gorilla Sessions](https://www.gorillatoolkit.org/pkg/sessions). PAA tokens (gateway access tokens)
@@ -76,8 +76,8 @@ if you want.
 
 ### Mixing authentication mechanisms
 
-It is technically possible to mix authentication mechanisms. Currently, you can mix local with Kerberos or NTLM. If you enable 
-OpenID Connect it is not possible to mix it with local or Kerberos at the moment.
+It is technically possible to mix authentication mechanisms. Currently, you can mix local or ldap with Kerberos or NTLM. If you enable 
+OpenID Connect it is not possible to mix it with local, ldap or Kerberos at the moment.
 
 ### OpenID Connect
 
@@ -91,6 +91,10 @@ For detailed Kerberos setup including keytab generation, DNS requirements, and K
 ### PAM/Local Authentication
 
 For detailed PAM setup including LDAP integration, container deployment, and compatible clients, see the [PAM Authentication Documentation](docs/pam-authentication.md).
+
+### LDAP Authentication
+
+For HTTP Basic credentials verified by an LDAP bind, with group checks, lockout and TLS-terminating proxies, see the [LDAP Authentication Documentation](docs/ldap-authentication.md).
 
 ### NTLM Authentication
 
@@ -131,15 +135,17 @@ TLS termination.
 ```yaml
 # web server configuration. 
 Server:
- # can be set to openid, kerberos, local and ntlm. If openid is used rdpgw expects
+ # can be set to openid, kerberos, local, ldap and ntlm. If openid is used rdpgw expects
  # a configured openid provider, make sure to set caps.tokenauth to true. If local
  # rdpgw connects to rdpgw-auth over a socket to verify users and password. Note:
  # rdpgw-auth needs to be run as root or setuid in order to work. If kerberos is
  # used a keytab and krb5conf need to be supplied. local can be stacked with 
  # kerberos or ntlm authentication, so that the clients selects what it wants.
+ # ldap verifies basic auth credentials against an LDAP server (see Ldap below).
  Authentication:
   # - kerberos
   # - local
+  # - ldap
   - openid
   # - ntlm
  # The socket to connect to if using local auth. Ensure rdpgw auth is configured to
@@ -150,9 +156,11 @@ Server:
  # The default option 'auto' uses a certificate file if provided and found otherwise
  # it uses letsencrypt to obtain a certificate, the latter requires that the host is reachable
  # from letsencrypt servers. If TLS termination happens somewhere else (e.g. a load balancer)
- # set this option to 'disable'. This is mutually exclusive with 'authentication: local'
+ # set this option to 'disable'. Basic auth (local, ldap) then also needs
+ # TlsTerminatedByProxy: true and the proxy in TrustedProxies.
  # Note: rdp connections over a gateway require TLS
  Tls: auto
+ # TlsTerminatedByProxy: false
  # gateway address advertised in the rdp files and browser
  GatewayAddress: localhost
  # port to listen on (change to 80 or equivalent if not using TLS)
@@ -184,7 +192,9 @@ Server:
  # CIDR allow-list of upstream proxies whose X-Forwarded-For header is
  # trusted when deriving the client IP. Empty (default) makes the
  # gateway ignore X-Forwarded-For and use the request's RemoteAddr.
- # Set this to the proxy/load-balancer subnet that fronts the gateway.
+ # Set this to the proxy/load-balancer subnet that fronts the gateway, and
+ # to every proxy in front of it: the client is the rightmost
+ # X-Forwarded-For address not in this list.
  # TrustedProxies:
  #  - 10.0.0.0/8
  # a random strings of at least 32 characters to secure cookies on the client
@@ -205,6 +215,18 @@ OpenId:
  ProviderUrl: http://keycloak/auth/realms/test
  ClientId: rdpgw
  ClientSecret: your-secret
+# Ldap:
+#  Url: ldaps://ldap.example.com:636
+#  UserDnTemplate: uid={username},ou=people,dc=example,dc=com
+#  RequiredGroups:
+#   - cn=rdp,ou=groups,dc=example,dc=com
+# Throttling of basic auth (local, ldap); durations in seconds, these are the defaults
+# Lockout:
+#  IpMaxFailures: 10
+#  IpDuration: 3600
+#  UserMaxFailures: 5
+#  UserDuration: 300
+#  Window: 900
 # Kerberos:
 #  Keytab: /etc/keytabs/rdpgw.keytab
 #  Krb5conf: /etc/krb5.conf

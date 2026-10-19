@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/identity"
@@ -86,6 +87,38 @@ func TestEnrichContextXForwardedForRequiresTrustedProxy(t *testing.T) {
 			if got != tc.wantClientIp {
 				t.Errorf("AttrClientIp = %q, want %q (remoteAddr=%q xff=%q trusted=%v)",
 					got, tc.wantClientIp, tc.remoteAddr, tc.xff, tc.trustedProxies)
+			}
+		})
+	}
+}
+
+func TestForwardedClient(t *testing.T) {
+	InitTrustedProxies([]string{"10.0.0.0/8"})
+	t.Cleanup(func() { InitTrustedProxies(nil) })
+
+	cases := []struct {
+		name        string
+		headers     []string
+		wantClient  string
+		wantProxies []string
+	}{
+		{"client then trusted hop", []string{"203.0.113.42, 10.99.0.1"}, "203.0.113.42", []string{"10.99.0.1"}},
+		{"spoofed entry left of an appending proxy", []string{"1.2.3.4, 203.0.113.42"}, "203.0.113.42", nil},
+		{"spoofed entry behind two hops", []string{"1.2.3.4, 203.0.113.42, 10.0.0.9"}, "203.0.113.42", []string{"10.0.0.9"}},
+		{"every hop trusted", []string{"10.5.5.5, 10.9.9.9"}, "10.5.5.5", []string{"10.9.9.9"}},
+		{"garbage left of the client", []string{"<script>, 203.0.113.42"}, "203.0.113.42", nil},
+		{"garbage appended by the peer", []string{"203.0.113.42, not-an-ip"}, "10.1.2.3", nil},
+		{"split across headers", []string{"1.2.3.4", "203.0.113.42, 10.0.0.9"}, "203.0.113.42", []string{"10.0.0.9"}},
+		{"ipv6 is normalized", []string{"2001:DB8::0001"}, "2001:db8::1", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, proxies := forwardedClient(tc.headers, "10.1.2.3")
+			if client != tc.wantClient {
+				t.Errorf("client = %q, want %q", client, tc.wantClient)
+			}
+			if !reflect.DeepEqual(proxies, tc.wantProxies) {
+				t.Errorf("proxies = %q, want %q", proxies, tc.wantProxies)
 			}
 		})
 	}

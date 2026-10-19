@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/bolkedebruin/gokrb5/v8/keytab"
 	"github.com/bolkedebruin/gokrb5/v8/service"
@@ -305,9 +306,42 @@ func main() {
 
 	// basic auth
 	if conf.Server.BasicAuthEnabled() {
-		log.Printf("enabling basic authentication")
-		q := web.BasicAuthHandler{SocketAddress: conf.Server.AuthSocket, Timeout: conf.Server.BasicAuthTimeout}
-		rdp.NewRoute().HeadersRegexp("Authorization", "Basic").HandlerFunc(q.BasicAuth(gw.HandleGatewayProtocol))
+		var backend web.PasswordAuthenticator = &web.SocketAuthenticator{SocketAddress: conf.Server.AuthSocket, Timeout: conf.Server.BasicAuthTimeout}
+		if conf.Server.LdapEnabled() {
+			log.Printf("enabling basic authentication against %s", conf.Ldap.Url)
+			l, err := web.NewLDAPAuthenticator(web.LDAPConfig{
+				URL:            conf.Ldap.Url,
+				StartTLS:       conf.Ldap.StartTls,
+				CAFile:         conf.Ldap.CaFile,
+				UserDNTemplate: conf.Ldap.UserDnTemplate,
+				RequiredGroups: conf.Ldap.RequiredGroups,
+				Timeout:        time.Second * time.Duration(conf.Server.BasicAuthTimeout),
+			})
+			if err != nil {
+				log.Fatalf("Cannot configure ldap authentication: %s", err)
+			}
+			if !l.Encrypted() {
+				log.Printf("ldap: passwords are sent to %s unencrypted; use ldaps:// or starttls unless the path is trusted", conf.Ldap.Url)
+			}
+			if len(conf.Ldap.RequiredGroups) == 0 {
+				log.Printf("ldap: no required groups configured, every user that can bind may use the gateway")
+			}
+			backend = l
+		} else {
+			log.Printf("enabling basic authentication")
+		}
+		lo := conf.Lockout
+		window := time.Second * time.Duration(lo.Window)
+		q := web.BasicAuthHandler{
+			Authenticator:   backend,
+			RequireProxyTLS: conf.Server.Tls == config.TlsDisable,
+			IPLimiter:       web.NewFailureLimiter(lo.IpMaxFailures, window, time.Second*time.Duration(lo.IpDuration)),
+			UserLimiter:     web.NewFailureLimiter(lo.UserMaxFailures, window, time.Second*time.Duration(lo.UserDuration)),
+		}
+		if q.RequireProxyTLS {
+			log.Printf("TLS disabled: basic auth is accepted only from trusted proxies that terminated TLS")
+		}
+		rdp.NewRoute().HeadersRegexp("Authorization", "(?i)^basic ").HandlerFunc(q.BasicAuth(gw.HandleGatewayProtocol))
 		auth.Register([]string{`Basic realm="restricted", charset="UTF-8"`}, nil)
 	}
 

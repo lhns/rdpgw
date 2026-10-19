@@ -42,12 +42,49 @@ func remoteIsTrustedProxy(remoteAddr string) bool {
 	if ip == nil {
 		return false
 	}
+	return isTrustedProxyIP(ip)
+}
+
+func isTrustedProxyIP(ip net.IP) bool {
 	for _, n := range trustedProxyNets {
 		if n.Contains(ip) {
 			return true
 		}
 	}
 	return false
+}
+
+// forwardedClient picks the client from X-Forwarded-For: the rightmost
+// address not in TrustedProxies. Entries left of it were written by the
+// client or by proxies we do not trust, so they are ignored. If every hop is
+// trusted, the leftmost one is the client. A malformed entry ends the walk at
+// the hop that appended it. proxies are the trusted hops right of the client.
+func forwardedClient(headers []string, peer string) (client string, proxies []string) {
+	var hops []string
+	for _, h := range headers {
+		for _, hop := range strings.Split(h, ",") {
+			if hop = strings.TrimSpace(hop); hop != "" {
+				hops = append(hops, hop)
+			}
+		}
+	}
+
+	client = peer
+	for i := len(hops) - 1; i >= 0; i-- {
+		ip := net.ParseIP(hops[i])
+		if ip == nil {
+			break
+		}
+		client = ip.String()
+		proxies = hops[i+1:]
+		if !isTrustedProxyIP(ip) {
+			break
+		}
+	}
+	if len(proxies) == 0 {
+		proxies = nil
+	}
+	return client, proxies
 }
 
 func EnrichContext(next http.Handler) http.Handler {
@@ -79,16 +116,7 @@ func EnrichContext(next http.Handler) http.Handler {
 		clientIp := remoteHost
 		var proxies []string
 		if remoteIsTrustedProxy(r.RemoteAddr) {
-			if h := r.Header.Get("X-Forwarded-For"); h != "" {
-				ips := strings.Split(h, ",")
-				for i := range ips {
-					ips[i] = strings.TrimSpace(ips[i])
-				}
-				clientIp = ips[0]
-				if len(ips) > 1 {
-					proxies = ips[1:]
-				}
-			}
+			clientIp, proxies = forwardedClient(r.Header.Values("X-Forwarded-For"), remoteHost)
 		}
 		id.SetAttribute(identity.AttrClientIp, clientIp)
 		id.SetAttribute(identity.AttrProxies, proxies)
