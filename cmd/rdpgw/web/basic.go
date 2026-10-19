@@ -28,6 +28,9 @@ type PasswordAuthenticator interface {
 
 var ErrAccessDenied = errors.New("user may not use the gateway")
 
+// BasicChallenge is the WWW-Authenticate value that asks for Basic credentials.
+const BasicChallenge = `Basic realm="restricted", charset="UTF-8"`
+
 // maxUsernameLen bounds what reaches the lockout table and the backend.
 const maxUsernameLen = 256
 
@@ -78,8 +81,8 @@ func (h *BasicAuthHandler) BasicAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if err != nil {
 			// A backend outage is not the client's failure.
-			h.IPLimiter.Succeeded(ipKey, false)
-			h.UserLimiter.Succeeded(userKey, false)
+			h.IPLimiter.Release(ipKey, false)
+			h.UserLimiter.Release(userKey, false)
 			log.Printf("auth: result=error method=basic user=%q client_ip=%q error=%q", username, clientIp, err)
 			http.Error(w, "Server error", http.StatusInternalServerError)
 			return
@@ -92,8 +95,8 @@ func (h *BasicAuthHandler) BasicAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		// The IP keeps its failures: a valid account must not reset the
 		// budget for guessing other accounts' passwords.
-		h.IPLimiter.Succeeded(ipKey, false)
-		h.UserLimiter.Succeeded(userKey, true)
+		h.IPLimiter.Release(ipKey, false)
+		h.UserLimiter.Release(userKey, true)
 		logBasicAuth("success", "", username, clientIp)
 
 		id.SetUserName(username)
@@ -122,7 +125,7 @@ func logBasicAuth(result, reason, username, clientIp string) {
 }
 
 func basicAuthChallenge(w http.ResponseWriter) {
-	w.Header().Add("WWW-Authenticate", `Basic realm="restricted", charset="UTF-8"`)
+	w.Header().Add("WWW-Authenticate", BasicChallenge)
 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 }
 

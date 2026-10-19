@@ -10,14 +10,9 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"time"
 
-	"github.com/bolkedebruin/gokrb5/v8/keytab"
-	"github.com/bolkedebruin/gokrb5/v8/service"
-	"github.com/bolkedebruin/gokrb5/v8/spnego"
 	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/config"
 	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/kdcproxy"
-	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/protocol"
 	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/security"
 	"github.com/bolkedebruin/rdpgw/cmd/rdpgw/web"
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -188,30 +183,7 @@ func main() {
 		}
 	}
 
-	// gateway confg
-	gw := protocol.Gateway{
-		RedirectFlags: protocol.RedirectFlags{
-			Clipboard:  conf.Caps.EnableClipboard,
-			Drive:      conf.Caps.EnableDrive,
-			Printer:    conf.Caps.EnablePrinter,
-			Port:       conf.Caps.EnablePort,
-			Pnp:        conf.Caps.EnablePnp,
-			DisableAll: conf.Caps.DisableRedirect,
-			EnableAll:  conf.Caps.RedirectAll,
-		},
-		IdleTimeout:   conf.Caps.IdleTimeout,
-		SmartCardAuth: conf.Caps.SmartCardAuth,
-		TokenAuth:     conf.Caps.TokenAuth,
-		ReceiveBuf:    conf.Server.ReceiveBuf,
-		SendBuf:       conf.Server.SendBuf,
-	}
-
-	if conf.Caps.TokenAuth {
-		gw.CheckPAACookie = security.CheckPAACookie
-		gw.CheckHost = security.CheckSession(security.CheckHost)
-	} else {
-		gw.CheckHost = security.CheckHost
-	}
+	gw, gwBasic := newGateways(&conf)
 
 	r := mux.NewRouter()
 
@@ -248,11 +220,6 @@ func main() {
 		// Asset files (no authentication required)
 		r.HandleFunc("/assets/connect.svg", h.ServeAssetFile("connect.svg"))
 		r.HandleFunc("/assets/icon.svg", h.ServeAssetFile("icon.svg"))
-
-		// only enable un-auth endpoint for openid only config
-		if !conf.Server.KerberosEnabled() && !conf.Server.BasicAuthEnabled() && !conf.Server.NtlmEnabled() && !conf.Server.HeaderEnabled() {
-			rdp.Name("gw").HandlerFunc(gw.HandleGatewayProtocol)
-		}
 	}
 
 	// header auth (configurable proxy)
@@ -282,85 +249,17 @@ func main() {
 		// Asset files (no authentication required)
 		r.HandleFunc("/assets/connect.svg", h.ServeAssetFile("connect.svg"))
 		r.HandleFunc("/assets/icon.svg", h.ServeAssetFile("icon.svg"))
-
-		// only enable un-auth endpoint for header only config
-		if !conf.Server.KerberosEnabled() && !conf.Server.BasicAuthEnabled() && !conf.Server.NtlmEnabled() && !conf.Server.OpenIDEnabled() {
-			rdp.Name("gw").HandlerFunc(gw.HandleGatewayProtocol)
-		}
 	}
 
-	// for stacking of authentication
-	auth := web.NewAuthMux()
-	rdp.MatcherFunc(web.NoAuthz).HandlerFunc(auth.SetAuthenticate)
-
-	// ntlm
-	if conf.Server.NtlmEnabled() {
-		log.Printf("enabling NTLM authentication")
-		ntlm := web.NTLMAuthHandler{SocketAddress: conf.Server.AuthSocket, Timeout: conf.Server.BasicAuthTimeout}
-		rdp.NewRoute().HeadersRegexp("Authorization", "NTLM").HandlerFunc(ntlm.NTLMAuth(gw.HandleGatewayProtocol))
-		rdp.NewRoute().HeadersRegexp("Authorization", "Negotiate").HandlerFunc(ntlm.NTLMAuth(gw.HandleGatewayProtocol))
-		auth.Register([]string{`NTLM`, `Negotiate`}, func(r *http.Request) bool {
-			return r.Header.Get("Sec-WebSocket-Protocol") != "binary" // rdp client for ios is incompatible with this NTLM method.
-		})
-	}
-
-	// basic auth
+	var basic *web.BasicAuthHandler
 	if conf.Server.BasicAuthEnabled() {
-		var backend web.PasswordAuthenticator = &web.SocketAuthenticator{SocketAddress: conf.Server.AuthSocket, Timeout: conf.Server.BasicAuthTimeout}
-		if conf.Server.LdapEnabled() {
-			log.Printf("enabling basic authentication against %s", conf.Ldap.Url)
-			l, err := web.NewLDAPAuthenticator(web.LDAPConfig{
-				URL:            conf.Ldap.Url,
-				StartTLS:       conf.Ldap.StartTls,
-				CAFile:         conf.Ldap.CaFile,
-				UserDNTemplate: conf.Ldap.UserDnTemplate,
-				RequiredGroups: conf.Ldap.RequiredGroups,
-				Timeout:        time.Second * time.Duration(conf.Server.BasicAuthTimeout),
-			})
-			if err != nil {
-				log.Fatalf("Cannot configure ldap authentication: %s", err)
-			}
-			if !l.Encrypted() {
-				log.Printf("ldap: passwords are sent to %s unencrypted; use ldaps:// or starttls unless the path is trusted", conf.Ldap.Url)
-			}
-			if len(conf.Ldap.RequiredGroups) == 0 {
-				log.Printf("ldap: no required groups configured, every user that can bind may use the gateway")
-			}
-			backend = l
-		} else {
-			log.Printf("enabling basic authentication")
-		}
-		lo := conf.Lockout
-		window := time.Second * time.Duration(lo.Window)
-		q := web.BasicAuthHandler{
-			Authenticator:   backend,
-			RequireProxyTLS: conf.Server.Tls == config.TlsDisable,
-			IPLimiter:       web.NewFailureLimiter(lo.IpMaxFailures, window, time.Second*time.Duration(lo.IpDuration)),
-			UserLimiter:     web.NewFailureLimiter(lo.UserMaxFailures, window, time.Second*time.Duration(lo.UserDuration)),
-		}
-		if q.RequireProxyTLS {
-			log.Printf("TLS disabled: basic auth is accepted only from trusted proxies that terminated TLS")
-		}
-		rdp.NewRoute().HeadersRegexp("Authorization", "(?i)^basic ").HandlerFunc(q.BasicAuth(gw.HandleGatewayProtocol))
-		auth.Register([]string{`Basic realm="restricted", charset="UTF-8"`}, nil)
+		basic = newBasicAuthHandler(&conf)
 	}
+	registerGateway(rdp, &conf, gw, gwBasic, basic)
 
-	// spnego / kerberos
 	if conf.Server.KerberosEnabled() {
-		log.Printf("enabling kerberos authentication")
-		keytab, err := keytab.Load(conf.Kerberos.Keytab)
-		if err != nil {
-			log.Fatalf("Cannot load keytab: %s", err)
-		}
-		rdp.NewRoute().HeadersRegexp("Authorization", "Negotiate").Handler(
-			spnego.SPNEGOKRB5Authenticate(web.TransposeSPNEGOContext(http.HandlerFunc(gw.HandleGatewayProtocol)),
-				keytab,
-				service.Logger(log.Default())))
-
-		// kdcproxy
 		k := kdcproxy.InitKdcProxy(conf.Kerberos.Krb5Conf)
 		r.HandleFunc(kdcProxyEndPoint, k.Handler).Methods("POST")
-		auth.Register([]string{"Negotiate"}, nil)
 	}
 
 	// setup server

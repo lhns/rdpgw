@@ -57,24 +57,24 @@ func TestFailureLimiterWindowResets(t *testing.T) {
 	mustAcquire(t, l, "k", false, true)
 }
 
-func TestFailureLimiterSucceeded(t *testing.T) {
+func TestFailureLimiterRelease(t *testing.T) {
 	l, _ := newTestLimiter(2, time.Minute, time.Hour)
 
 	// Handing back an attempt keeps successes from counting.
 	for i := 0; i < 5; i++ {
 		mustAcquire(t, l, "ip", true, false)
-		l.Succeeded("ip", false)
+		l.Release("ip", false)
 	}
 
 	mustAcquire(t, l, "user", true, false)
 	mustAcquire(t, l, "user", true, false)
-	l.Succeeded("user", true)
+	l.Release("user", true)
 	mustAcquire(t, l, "user", true, false)
 	mustAcquire(t, l, "user", true, false)
 	mustAcquire(t, l, "user", false, true)
 
 	// Success does not lift an active lockout.
-	l.Succeeded("user", false)
+	l.Release("user", false)
 	mustAcquire(t, l, "user", false, false)
 }
 
@@ -108,7 +108,7 @@ func TestFailureLimiterDisabled(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		mustAcquire(t, l, "k", true, false)
 	}
-	l.Succeeded("k", true)
+	l.Release("k", true)
 }
 
 func TestFailureLimiterBoundedMemory(t *testing.T) {

@@ -239,6 +239,7 @@ func TestLDAPAuthenticateTLS(t *testing.T) {
 	}{
 		{"starttls", LDAPConfig{URL: "ldap://" + plain.addr, StartTLS: true, CAFile: plain.caFile}},
 		{"ldaps", LDAPConfig{URL: "ldaps://" + ldaps.addr, CAFile: ldaps.caFile}},
+		{"ldaps, upper-case scheme", LDAPConfig{URL: "LDAPS://" + ldaps.addr, CAFile: ldaps.caFile}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

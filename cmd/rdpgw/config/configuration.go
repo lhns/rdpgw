@@ -58,6 +58,7 @@ const (
 	TlsAuto    = "auto"
 
 	HostSelectionSigned     = "signed"
+	HostSelectionAny        = "any"
 	HostSelectionRoundRobin = "roundrobin"
 
 	SessionStoreCookie = "cookie"
@@ -68,6 +69,9 @@ const (
 	AuthenticationKerberos = "kerberos"
 	AuthenticationHeader   = "header"
 	AuthenticationLdap     = "ldap"
+
+	UnauthenticatedPAA       = "paa"
+	UnauthenticatedChallenge = "challenge"
 )
 
 type Configuration struct {
@@ -118,6 +122,12 @@ type ServerConfig struct {
 	// Credentials are then accepted only from a TrustedProxies peer that
 	// reports X-Forwarded-Proto: https.
 	TlsTerminatedByProxy bool `koanf:"tlsterminatedbyproxy"`
+	// UnauthenticatedRequests decides where a gateway request without an
+	// Authorization header goes when openid is stacked with local or ldap:
+	// "paa" (default) serves it as an openid client that presents its PAA
+	// token inside the tunnel; "challenge" answers 401 with a Basic challenge.
+	// Must be empty otherwise.
+	UnauthenticatedRequests string `koanf:"unauthenticatedrequests"`
 }
 
 type KerberosConfig struct {
@@ -348,12 +358,12 @@ func Load(configFile string) Configuration {
 		log.Fatalf("refusing to start: %s", err)
 	}
 
-	if err := checkLockout(&Conf.Lockout); err != nil {
+	if err := checkStacking(&Conf); err != nil {
 		log.Fatalf("refusing to start: %s", err)
 	}
 
-	if Conf.Server.LdapEnabled() && (Conf.Server.matchAuth("local") || Conf.Server.matchAuth("basic")) {
-		log.Fatalf("local and ldap authentication both use basic auth and are not stackable")
+	if err := checkLockout(&Conf.Lockout); err != nil {
+		log.Fatalf("refusing to start: %s", err)
 	}
 
 	if Conf.Server.NtlmEnabled() && Conf.Server.KerberosEnabled() {
@@ -392,16 +402,48 @@ func checkBasicAuthTransport(s *ServerConfig) error {
 	return nil
 }
 
-// checkLdap rejects combinations in which no ldap client could connect.
+// checkLdap rejects ldap stacked with local, and combinations in which no
+// ldap client could connect. Stacked with openid, only the PAA gateway uses
+// caps.tokenauth, which openid already requires.
 func checkLdap(c *Configuration) error {
 	if !c.Server.LdapEnabled() {
 		return nil
 	}
-	if c.Caps.TokenAuth {
+	if c.Server.matchAuth("local") || c.Server.matchAuth("basic") {
+		return fmt.Errorf("local and ldap authentication both use basic auth and are not stackable")
+	}
+	if c.Caps.TokenAuth && !c.Server.OpenIDEnabled() {
 		return fmt.Errorf("ldap authentication needs caps.tokenauth: false; basic auth clients carry no PAA token")
 	}
 	if c.Server.HostSelection == HostSelectionSigned {
 		return fmt.Errorf("ldap authentication cannot use hostselection: signed, which needs a PAA token")
+	}
+	return nil
+}
+
+// checkStacking validates server.unauthenticatedrequests and the
+// combinations of openid stacked with basic auth.
+func checkStacking(c *Configuration) error {
+	s := &c.Server
+	mode := s.UnauthenticatedMode()
+	if !s.Stacked() {
+		if strings.TrimSpace(s.UnauthenticatedRequests) != "" {
+			return fmt.Errorf("server.unauthenticatedrequests only applies when openid is stacked with local or ldap")
+		}
+		return nil
+	}
+	if mode != UnauthenticatedPAA && mode != UnauthenticatedChallenge {
+		return fmt.Errorf("server.unauthenticatedrequests must be %q or %q, got %q",
+			UnauthenticatedPAA, UnauthenticatedChallenge, s.UnauthenticatedRequests)
+	}
+	if s.KerberosEnabled() || s.NtlmEnabled() || s.HeaderEnabled() {
+		return fmt.Errorf("openid stacked with local or ldap cannot be combined with kerberos, ntlm or header authentication")
+	}
+	switch s.HostSelection {
+	case HostSelectionSigned:
+		return fmt.Errorf("openid stacked with local or ldap cannot use hostselection: signed, which basic auth clients cannot satisfy")
+	case HostSelectionAny:
+		return fmt.Errorf("openid stacked with local or ldap cannot use hostselection: any, which would let basic auth users reach any destination")
 	}
 	return nil
 }
@@ -428,6 +470,22 @@ func (s *ServerConfig) KerberosEnabled() bool {
 // endpoint, whichever backend verifies it.
 func (s *ServerConfig) BasicAuthEnabled() bool {
 	return s.matchAuth("local") || s.matchAuth("basic") || s.LdapEnabled()
+}
+
+// Stacked reports whether OpenID (PAA token) and HTTP Basic share the
+// gateway endpoint.
+func (s *ServerConfig) Stacked() bool {
+	return s.OpenIDEnabled() && s.BasicAuthEnabled()
+}
+
+// UnauthenticatedMode returns the normalized UnauthenticatedRequests,
+// defaulting to "paa" when stacked.
+func (s *ServerConfig) UnauthenticatedMode() string {
+	m := strings.ToLower(strings.TrimSpace(s.UnauthenticatedRequests))
+	if m == "" && s.Stacked() {
+		return UnauthenticatedPAA
+	}
+	return m
 }
 
 func (s *ServerConfig) LdapEnabled() bool {

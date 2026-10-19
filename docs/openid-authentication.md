@@ -59,6 +59,12 @@ OpenId:
   ClientSecret: your-google-secret
 ```
 
+## Stacking with basic auth
+
+OpenID can share an instance with `ldap` or `local` for clients that cannot do
+OpenID, such as the Android Windows App. See
+[Stacking OpenID with basic auth](ldap-authentication.md#stacking-openid-with-basic-auth).
+
 ## Security Considerations
 
 - Always use HTTPS for production deployments

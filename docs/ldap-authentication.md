@@ -64,7 +64,7 @@ RDPGW_LDAP__USER_DN_TEMPLATE=uid={username},ou=people,dc=example,dc=com
 RDPGW_LDAP__REQUIRED_GROUPS=cn=rdp,ou=groups,dc=example,dc=com
 ```
 
-`ldap` refuses to start with `TokenAuth: true` or `HostSelection: signed`,
+`ldap` refuses to start with `TokenAuth: true` (unless stacked with `openid`) or `HostSelection: signed`,
 which both need a PAA token. Use `unsigned` with an explicit `Hosts` list (or
 `roundrobin`).
 
@@ -73,10 +73,63 @@ template included) must not contain spaces; `RDPGW_LDAP__REQUIRED_GROUPS` takes
 several DNs separated by spaces.
 
 `ldap` replaces `local`: both are Basic auth, so they cannot be enabled
-together. `ldap` can be stacked with `ntlm` or `kerberos`. It cannot share an
-instance with `openid`, because an OpenID client sends no `Authorization`
-header and would get the Basic challenge; run a second instance on its own
-hostname instead.
+together. `ldap` can be stacked with `ntlm` or `kerberos`, or with `openid`
+(see below).
+
+## Stacking OpenID with basic auth
+
+`openid` together with `ldap` (or `local`) serves both client kinds on the same
+gateway endpoint: mstsc with an OpenID RDP file sends its PAA token inside the
+tunnel, and Basic clients (e.g. the Android Windows App) send credentials.
+rdpgw routes on the `Authorization` header:
+
+- `Basic ...` is always verified against the backend and served by a gateway
+  that needs no token.
+- Any other scheme (e.g. `Bearer`) goes to the PAA gateway, which needs a
+  valid PAA token in the tunnel.
+- No `Authorization` header goes where `UnauthenticatedRequests` says.
+
+```yaml
+Server:
+  Authentication:
+    - openid
+    - ldap
+  HostSelection: unsigned     # or roundrobin
+  Hosts:
+    - 10.0.0.10:3389
+  # paa (default): a request without Authorization is an OpenID client; it
+  #   must present a PAA token. Basic clients must send credentials up front.
+  # challenge: such a request gets 401 with a Basic challenge. OpenID
+  #   clients must then survive that 401 (a request without Authorization
+  #   never reaches the PAA path).
+  UnauthenticatedRequests: paa
+Caps:
+  TokenAuth: true             # stays true; only the PAA gateway uses it
+```
+
+`RDPGW_SERVER__UNAUTHENTICATED_REQUESTS=paa|challenge` sets it as an
+environment variable. Behind a TLS-terminating proxy also set
+`TlsTerminatedByProxy` and `TrustedProxies` (see below).
+
+Refused at startup: an invalid value; the setting without `openid` and a Basic
+backend; stacking with `kerberos`, `ntlm` or `header`; `HostSelection: signed`
+(Basic clients have no token) and `any` (Basic clients would get no
+destination policy, an open proxy). Basic clients can reach only `Hosts`.
+
+The Android Windows App sends Basic credentials only after a 401, so it needs
+`challenge`; in `paa` mode its first request fails on the PAA path. Whether an
+OpenID client survives the 401 depends on the client. To see which path a
+client took, read the log:
+
+- `auth: result=... method=basic` shows Basic attempts.
+- `Invalid PAA cookie received` or a capability mismatch (`has no matching
+  capability configured`, or `caps are required by the server`) shows a
+  client on the wrong path: a Basic client in `paa` mode that sent no
+  credentials, or an OpenID client that did not send its token.
+- `rejecting reuse of Rdg-Connection-Id` shows the two halves of a legacy
+  (non-websocket) session arriving as different clients or IPs.
+
+Use `paa` only if every Basic client sends credentials preemptively.
 
 ## Behind a TLS-terminating proxy
 
@@ -129,7 +182,9 @@ auth: result=success method=basic user="alice" client_ip="198.51.100.2"
 ```
 
 `reason` is `invalid_credentials`, `access_denied` (valid password, not in a
-required group) or `locked_out`. Passwords are never logged.
+required group) or `locked_out`. A request refused for its transport (see
+above) logs `result=rejected reason=insecure_transport` instead, without
+checking the credentials. Passwords are never logged.
 
 ## Security considerations
 

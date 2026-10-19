@@ -48,6 +48,7 @@ type LDAPConfig struct {
 // service account.
 type LDAPAuthenticator struct {
 	url            string
+	ldaps          bool
 	startTLS       bool
 	tlsConfig      *tls.Config
 	userDNTemplate string
@@ -108,6 +109,7 @@ func NewLDAPAuthenticator(c LDAPConfig) (*LDAPAuthenticator, error) {
 
 	return &LDAPAuthenticator{
 		url:            c.URL,
+		ldaps:          u.Scheme == "ldaps",
 		startTLS:       c.StartTLS,
 		tlsConfig:      tlsConfig,
 		userDNTemplate: c.UserDNTemplate,
@@ -119,7 +121,7 @@ func NewLDAPAuthenticator(c LDAPConfig) (*LDAPAuthenticator, error) {
 // Encrypted reports whether credentials are protected on the way to the
 // LDAP server.
 func (a *LDAPAuthenticator) Encrypted() bool {
-	return a.startTLS || strings.HasPrefix(a.url, "ldaps://")
+	return a.startTLS || a.ldaps
 }
 
 func (a *LDAPAuthenticator) Authenticate(ctx context.Context, username, password string) (bool, error) {

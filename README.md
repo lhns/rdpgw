@@ -77,7 +77,7 @@ if you want.
 ### Mixing authentication mechanisms
 
 It is technically possible to mix authentication mechanisms. Currently, you can mix local or ldap with Kerberos or NTLM. If you enable 
-OpenID Connect it is not possible to mix it with local, ldap or Kerberos at the moment.
+OpenID Connect it can be mixed with local or ldap (see [Stacking OpenID with basic auth](docs/ldap-authentication.md#stacking-openid-with-basic-auth)), but not with Kerberos, NTLM or header authentication.
 
 ### OpenID Connect
 
@@ -139,8 +139,9 @@ Server:
  # a configured openid provider, make sure to set caps.tokenauth to true. If local
  # rdpgw connects to rdpgw-auth over a socket to verify users and password. Note:
  # rdpgw-auth needs to be run as root or setuid in order to work. If kerberos is
- # used a keytab and krb5conf need to be supplied. local can be stacked with 
- # kerberos or ntlm authentication, so that the clients selects what it wants.
+ # used a keytab and krb5conf need to be supplied. local or ldap can be stacked with
+ # kerberos or ntlm authentication, so that the clients selects what it wants, or
+ # with openid (see UnauthenticatedRequests).
  # ldap verifies basic auth credentials against an LDAP server (see Ldap below).
  Authentication:
   # - kerberos
@@ -197,6 +198,10 @@ Server:
  # X-Forwarded-For address not in this list.
  # TrustedProxies:
  #  - 10.0.0.0/8
+ # Only with openid stacked with local or ldap: where a gateway request without an
+ # Authorization header goes. paa (default) serves it as an openid client, challenge
+ # answers 401 Basic. See docs/ldap-authentication.md, "Stacking OpenID with basic auth".
+ # UnauthenticatedRequests: paa
  # a random strings of at least 32 characters to secure cookies on the client
  # make sure to share this across the different pods
  SessionKey: thisisasessionkeyreplacethisjetzt

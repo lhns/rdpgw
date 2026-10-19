@@ -167,6 +167,7 @@ func TestHeaderConfigValidation(t *testing.T) {
 		})
 	}
 }
+
 func TestBasicAuthBackends(t *testing.T) {
 	cases := []struct {
 		authentication []string
@@ -268,6 +269,9 @@ func TestCheckLdap(t *testing.T) {
 		{"unsigned without token auth", Configuration{Server: ServerConfig{Authentication: []string{"ldap"}, HostSelection: "unsigned"}}, false},
 		{"token auth on", Configuration{Server: ServerConfig{Authentication: []string{"ldap"}}, Caps: RDGCapsConfig{TokenAuth: true}}, true},
 		{"signed hosts", Configuration{Server: ServerConfig{Authentication: []string{"ldap"}, HostSelection: HostSelectionSigned}}, true},
+		{"stacked with openid keeps token auth", Configuration{Server: ServerConfig{Authentication: []string{"openid", "ldap"}, HostSelection: "unsigned"}, Caps: RDGCapsConfig{TokenAuth: true}}, false},
+		{"stacked still refuses signed", Configuration{Server: ServerConfig{Authentication: []string{"openid", "ldap"}, HostSelection: HostSelectionSigned}, Caps: RDGCapsConfig{TokenAuth: true}}, true},
+		{"stacked with local", Configuration{Server: ServerConfig{Authentication: []string{"ldap", "local"}, HostSelection: "unsigned"}}, true},
 		{"other modes untouched", Configuration{Server: ServerConfig{Authentication: []string{"openid"}}, Caps: RDGCapsConfig{TokenAuth: true}}, false},
 	}
 	for _, tc := range cases {
@@ -300,5 +304,62 @@ func TestCheckLockout(t *testing.T) {
 				t.Errorf("checkLockout(%+v) = %v, wantErr %t", l, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestCheckStacking(t *testing.T) {
+	stacked := func(mode, hosts string, auth ...string) Configuration {
+		return Configuration{Server: ServerConfig{Authentication: auth, HostSelection: hosts, UnauthenticatedRequests: mode}}
+	}
+	cases := []struct {
+		name    string
+		c       Configuration
+		wantErr bool
+	}{
+		{"openid+local default", stacked("", "roundrobin", "openid", "local"), false},
+		{"openid+ldap paa", stacked("paa", "unsigned", "openid", "ldap"), false},
+		{"openid+ldap challenge", stacked("challenge", "unsigned", "openid", "ldap"), false},
+		{"normalized", stacked("  Challenge ", "unsigned", "openid", "local"), false},
+		{"invalid value", stacked("both", "unsigned", "openid", "local"), true},
+		{"set without stacking, openid only", stacked("paa", "roundrobin", "openid"), true},
+		{"set without stacking, ldap only", stacked("challenge", "unsigned", "ldap"), true},
+		{"blank is unset", stacked("  ", "roundrobin", "openid"), false},
+		{"with kerberos", stacked("", "unsigned", "openid", "local", "kerberos"), true},
+		{"with ntlm", stacked("", "unsigned", "openid", "local", "ntlm"), true},
+		{"with header", stacked("", "unsigned", "openid", "local", "header"), true},
+		{"signed", stacked("", "signed", "openid", "local"), true},
+		{"any", stacked("", "any", "openid", "ldap"), true},
+		{"kerberos+local without openid is not stacked", stacked("", "any", "local", "kerberos"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkStacking(&tc.c); (err != nil) != tc.wantErr {
+				t.Errorf("checkStacking() = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestUnauthenticatedMode(t *testing.T) {
+	if got := (&ServerConfig{Authentication: []string{"openid", "ldap"}}).UnauthenticatedMode(); got != UnauthenticatedPAA {
+		t.Errorf("stacked default = %q, want paa", got)
+	}
+	if got := (&ServerConfig{Authentication: []string{"openid"}}).UnauthenticatedMode(); got != "" {
+		t.Errorf("not stacked = %q, want empty", got)
+	}
+}
+
+func TestLoadUnauthenticatedRequestsFromEnv(t *testing.T) {
+	t.Setenv("RDPGW_SERVER__AUTHENTICATION", "openid ldap")
+	t.Setenv("RDPGW_SERVER__HOST_SELECTION", "unsigned")
+	t.Setenv("RDPGW_SERVER__UNAUTHENTICATED_REQUESTS", " Challenge ")
+	Conf = Configuration{}
+
+	c := Load("does-not-exist.yaml")
+	if !c.Server.Stacked() {
+		t.Fatalf("not stacked, authentication = %v", c.Server.Authentication)
+	}
+	if got := c.Server.UnauthenticatedMode(); got != UnauthenticatedChallenge {
+		t.Errorf("UnauthenticatedMode() = %q, want challenge", got)
 	}
 }

@@ -12,8 +12,8 @@ const maxLimiterEntries = 100000
 
 // FailureLimiter locks a key (a client IP or a username) out after too many
 // login attempts within a window. Attempts are counted when they start, so
-// parallel requests cannot overshoot the limit; a successful attempt is
-// handed back with Succeeded.
+// parallel requests cannot overshoot the limit; an attempt that did not fail
+// is handed back with Release.
 type FailureLimiter struct {
 	max     int
 	window  time.Duration
@@ -80,9 +80,9 @@ func (l *FailureLimiter) Acquire(key string) (ok bool, lockedNow bool) {
 	return true, false
 }
 
-// Succeeded hands back the attempt reserved for key. With forget, the key's
+// Release hands back the attempt reserved for key. With forget, the key's
 // history is dropped as well.
-func (l *FailureLimiter) Succeeded(key string, forget bool) {
+func (l *FailureLimiter) Release(key string, forget bool) {
 	if l == nil {
 		return
 	}
