@@ -205,3 +205,41 @@ func TestTunnelOwnershipEnforced(t *testing.T) {
 		t.Fatalf("a different identity attached to a cached tunnel via Rdg-Connection-Id (status %q); the header was treated as authorization", line)
 	}
 }
+
+func testIdentity(user, ip string, authenticated bool) identity.Identity {
+	id := identity.NewUser()
+	id.SetUserName(user)
+	id.SetAuthenticated(authenticated)
+	if ip != "" {
+		id.SetAttribute(identity.AttrClientIp, ip)
+	}
+	return id
+}
+
+func TestTunnelOwnerMatches(t *testing.T) {
+	cases := []struct {
+		name   string
+		cached identity.Identity
+		req    identity.Identity
+		want   bool
+	}{
+		{"same user and ip", testIdentity("alice", "10.0.0.1", true), testIdentity("alice", "10.0.0.1", true), true},
+		{"same user, different ip", testIdentity("alice", "10.0.0.1", true), testIdentity("alice", "10.0.0.2", true), false},
+		{"different user", testIdentity("alice", "10.0.0.1", true), testIdentity("bob", "10.0.0.1", true), false},
+		{"unauthenticated halves, same ip (PAA legacy)", testIdentity("", "10.0.0.1", false), testIdentity("", "10.0.0.1", false), true},
+		{"unauthenticated halves, different ip", testIdentity("", "10.0.0.1", false), testIdentity("", "10.0.0.2", false), false},
+		{"unauthenticated halves, no ip", testIdentity("", "", false), testIdentity("", "", false), false},
+		{"cached unauthenticated, request has username", testIdentity("", "10.0.0.1", false), testIdentity("alice", "10.0.0.1", true), false},
+		{"cached has username, request unauthenticated", testIdentity("alice", "10.0.0.1", true), testIdentity("", "10.0.0.1", false), false},
+		{"empty username but authenticated cached", testIdentity("", "10.0.0.1", true), testIdentity("", "10.0.0.1", false), false},
+		{"empty username but authenticated request", testIdentity("", "10.0.0.1", false), testIdentity("", "10.0.0.1", true), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tunnelOwnerMatches(&Tunnel{User: tc.cached}, tc.req)
+			if got != tc.want {
+				t.Errorf("tunnelOwnerMatches = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

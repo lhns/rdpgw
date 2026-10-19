@@ -115,19 +115,26 @@ func (g *Gateway) HandleGatewayProtocol(w http.ResponseWriter, r *http.Request) 
 // identity making the current request. The Rdg-Connection-Id is a client-
 // chosen header that pairs the two halves of a session; without this check
 // any caller who learns or guesses one can attach to another user's tunnel.
+//
+// Authenticated halves must carry the same non-empty username and client IP.
+// On the PAA path neither half has a username yet: CheckPAACookie sets it at
+// TUNNEL_CREATE, after both legacy halves arrived. Two unauthenticated halves
+// from the same non-empty client IP therefore pair. That grants nothing, as
+// the PAA token is still verified in the tunnel; an authenticated half never
+// pairs with an unauthenticated one.
 func tunnelOwnerMatches(t *Tunnel, id identity.Identity) bool {
 	if t == nil || t.User == nil || id == nil {
 		return false
 	}
-	if t.User.UserName() == "" || t.User.UserName() != id.UserName() {
-		return false
-	}
 	cachedIp, _ := t.User.GetAttribute(identity.AttrClientIp).(string)
 	reqIp, _ := id.GetAttribute(identity.AttrClientIp).(string)
-	if cachedIp == "" {
+	if cachedIp == "" || cachedIp != reqIp {
 		return false
 	}
-	return cachedIp == reqIp
+	if t.User.UserName() == "" && id.UserName() == "" {
+		return !t.User.Authenticated() && !id.Authenticated()
+	}
+	return t.User.UserName() != "" && t.User.UserName() == id.UserName()
 }
 
 // headerHasToken reports whether the HTTP header named by name contains
