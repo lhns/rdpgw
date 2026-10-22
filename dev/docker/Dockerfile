@@ -1,5 +1,5 @@
 # builder stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Install CA certificates explicitly in builder
 RUN apk --no-cache add git gcc musl-dev linux-pam-dev
@@ -16,7 +16,7 @@ RUN cd /app && \
     chmod +x /opt/rdpgw/rdpgw && \
     chmod +x /opt/rdpgw/rdpgw-auth
 
-FROM alpine:latest
+FROM alpine:3.24.3
 # Install CA certificates and (for the dev compose) openssl so the
 # entrypoint can mint an ephemeral self-signed cert at startup. No cert
 # is baked into the image, so each container instance gets its own key.
